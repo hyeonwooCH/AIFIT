@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'camera_squirt.dart'; // 조금 뒤에 만들 카메라 화면
+import 'camera_squat.dart'; // 조금 뒤에 만들 카메라 화면
 
 class GuideScreen extends StatelessWidget {
   final String exerciseName;

@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import '../theme/app_theme.dart'; // 필요한 경우 테마 임포트
-import 'guide_squirt.dart';
+import 'guide_squat.dart';
 
 class Exercise extends StatefulWidget {
   const Exercise({super.key});

@@ -1,45 +1,49 @@
 import 'dart:io';
-import 'package:flutter/foundation.dart';
+import 'dart:math'; 
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
+import 'package:flutter/foundation.dart';
+
+// 프로젝트 내부 로직 임포트
 import 'package:ai_fit/ml/pose_painter.dart';
-import 'package:ai_fit/logic/squat_engine.dart';
+import 'package:ai_fit/logic/squat_engine.dart'; 
 import 'package:ai_fit/logic/feature_extractor.dart';
 import 'package:ai_fit/logic/posture_inferrer.dart';
-import 'package:ai_fit/widgets/squat_feedback_bar.dart';
-import 'package:ai_fit/widgets/squat_counter_display.dart';
 
-class CameraSquirtScreen extends StatefulWidget {
-  const CameraSquirtScreen({super.key});
+// 분리된 UI 위젯 임포트
+import 'package:ai_fit/widgets/squat_guideview.dart';
+import 'package:ai_fit/widgets/squat_analysis_overlay.dart';
+
+class CameraSquat extends StatefulWidget {
+  const CameraSquat({super.key});
 
   @override
-  State<CameraSquirtScreen> createState() => _CameraSquirtScreenState();
+  State<CameraSquat> createState() => _CameraSquatState();
 }
 
-class _CameraSquirtScreenState extends State<CameraSquirtScreen> {
+class _CameraSquatState extends State<CameraSquat> {
   CameraController? _controller;
   bool _isCameraInitialized = false;
-
-  // ✨ AI 엔진 및 상태 설정
   final PoseDetector _poseDetector = PoseDetector(options: PoseDetectorOptions());
-  bool _isBusy = false; 
-  bool _isStarted = false; // 가짜 카운트 방지를 위한 시작 플래그
-  List<Pose> _poses = []; 
+  
+  bool _isBusy = false;
+  bool _isStarted = false;
+  List<Pose> _poses = [];
 
-  final SquatCounter _counter = SquatCounter();
   int _squatCount = 0;
   String _squatState = 'UP';
-
-  final PostureInferrer _inferrer = PostureInferrer();
   String _feedbackMessage = "전신이 보이게 서주세요";
   bool _isSpineOk = true;
   bool _isKneeOk = true;
 
+  final SquatCounter _counter = SquatCounter();
+  final PostureInferrer _inferrer = PostureInferrer();
+
   @override
   void initState() {
     super.initState();
-    _inferrer.loadModels(); // AI 뇌 장착
+    _inferrer.loadModels(); 
     _initializeCamera();
   }
 
@@ -53,108 +57,177 @@ class _CameraSquirtScreenState extends State<CameraSquirtScreen> {
     );
 
     _controller = CameraController(
-      camera,
-      ResolutionPreset.high,
+      camera, 
+      ResolutionPreset.high, 
       enableAudio: false,
       imageFormatGroup: Platform.isIOS ? ImageFormatGroup.bgra8888 : ImageFormatGroup.yuv420,
     );
-
+    
     await _controller!.initialize();
 
-    _controller?.startImageStream((CameraImage image) {
-      if (_isBusy) return;
-      _processCameraImage(image);
+    _controller?.startImageStream((image) {
+      if (_isBusy || !_isStarted) return;
+      _processImage(image);
     });
 
     if (mounted) setState(() => _isCameraInitialized = true);
   }
 
-  Future<void> _processCameraImage(CameraImage image) async {
-    // 시작 버튼을 누르기 전에는 분석을 건너뛰어 가짜 카운트를 방지합니다
-    if (_isBusy || !_isStarted) return; 
+  Future<void> _processImage(CameraImage image) async {
     _isBusy = true;
-    print("분석 시작!");
-
+    
     final inputImage = _inputImageFromCameraImage(image);
     if (inputImage == null) {
-      print("inputImage 생성 실패");
       _isBusy = false;
       return;
     }
 
     final poses = await _poseDetector.processImage(inputImage);
-    print("감지된 포즈 개수: ${poses.length}");
-
-    print("📸 감지된 포즈 개수: ${poses.length}");
-
-    int newCount = _squatCount;
-    String newState = _squatState;
-    String newFeedback = _feedbackMessage;
-    bool newSpineOk = _isSpineOk;
-    bool newKneeOk = _isKneeOk;
-
+    
     if (poses.isNotEmpty) {
       final pose = poses.first;
-      final coreLandmarks = [11, 12, 23, 24, 25, 26, 27, 28]; // 어깨, 골반, 무릎, 발목
-      bool isVisible = coreLandmarks.every((index) => 
-        (pose.landmarks[PoseLandmarkType.values[index]]?.likelihood ?? 0) > 0.3
-      );
+      
+      // 1. 골반(0,0,0) 기준으로 모든 랜드마크 정규화
+      final Map<int, Vector3> landmarkMap = _convertPoseToMap(pose);
 
-      if (!isVisible) {
+      // 25번(왼쪽 무릎), 26번(오른쪽 무릎) 랜드마크 확인
+      if (landmarkMap.containsKey(25) && landmarkMap.containsKey(26)) {
+        
+        // 2. 골반 대비 무릎의 상대적 Y좌표 (화면 위치에 영향받지 않는 절대 수치)
+        final normalizedKneeY = (landmarkMap[25]!.y + landmarkMap[26]!.y) / 2;
+
+        // 3. TFLite AI 모델로 자세 검증 (Spine, Knee)
+        final features = FeatureExtractor.extract(landmarkMap);
+        final aiResult = _inferrer.infer(features);
+        
+        final bool isSpineOk = aiResult['spine']['ok'];
+        final bool isKneeOk = aiResult['knee']['ok'];
+        final bool isPosturePerfect = isSpineOk && isKneeOk;
+
+        // 4. 카운터에 "무릎 높이"와 "현재 자세의 완벽함"을 넘겨서 판정
+        final countResult = _counter.update(normalizedKneeY, isPosturePerfect);
+
         if (mounted) {
           setState(() {
-            _feedbackMessage = "전신이 보이게 서주세요";
-            _poses = []; 
+            _poses = poses;
+            _squatCount = countResult['count'];
+            _squatState = countResult['state'];
+            _isSpineOk = isSpineOk;
+            _isKneeOk = isKneeOk;
+
+            // 5. 상태에 따른 멘트 출력 제어
+            if (_squatState == 'UP') {
+              _feedbackMessage = "스쿼트를 진행해주세요";
+            } else { // DOWN 상태 (앉고 있는 중)
+              _feedbackMessage = isPosturePerfect ? "완벽한 자세입니다!" : "자세를 교정해주세요";
+            }
           });
         }
-        _isBusy = false;
-        return; 
       }
-
-      // ----------------------------------------------------
-      // 여기서부터는 '전신이 확실히 보일 때만' 실행되는 진짜 분석 로직입니다
-      final landmarkMap = _convertPoseToMap(pose);
-
-      if (landmarkMap.containsKey(23) && landmarkMap.containsKey(24)) {
-        final hipY = (landmarkMap[23]!.y + landmarkMap[24]!.y) / 2;
-
-        // 1. 개수 카운팅 업데이트
-        final result = _counter.update(hipY);
-        newCount = result['count'];
-        newState = result['state'];
-
-        // 2. AI 모델용 피처 추출 및 추론 실행
-        final features = FeatureExtractor.extract(landmarkMap);
-        final aiResult = _inferrer.infer(features); // ✨ 진짜 AI 지능 연결 부분
-      
-        newSpineOk = aiResult['spine']['ok'];
-        newKneeOk = aiResult['knee']['ok'];
-
-        // 피드백 메시지 결정
-        if (newSpineOk && newKneeOk) {
-          newFeedback = "완벽한 자세입니다!";
-        } else if (!newSpineOk) {
-          newFeedback = "허리를 더 펴주세요!";
-        } else {
-          newFeedback = "무릎 방향에 주의하세요!";
-        }
-      }
-      // ----------------------------------------------------
-    } else {
-      newFeedback = "사람을 찾을 수 없습니다";
-    }
-
-    if (mounted) {
-      setState(() {
-        _poses = poses;
-        _squatCount = newCount;
-        _squatState = newState;
-        _feedbackMessage = newFeedback;
-        _isSpineOk = newSpineOk;
-        _isKneeOk = newKneeOk;
-      });
     }
     _isBusy = false;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_isCameraInitialized) {
+      return const Scaffold(
+        backgroundColor: Colors.black,
+        body: Center(child: CircularProgressIndicator(color: Colors.white)),
+      );
+    }
+
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(
+        children: [
+          // 1층: 전체 화면 카메라 (여백 없음)
+          _buildCameraPreview(),
+
+          // 2층: AI 뼈대 렌더링 (카메라와 비율 동기화하여 치우침 방지)
+          if (_poses.isNotEmpty) _buildSkeletonPainter(),
+
+          // 3층: 분석 UI (카운터 좌측상단 / 피드백 우측하단 배치)
+          SquatAnalysisOverlay(
+            count: _squatCount,
+            state: _squatState,
+            feedback: _feedbackMessage,
+            isSpineOk: _isSpineOk,
+            isKneeOk: _isKneeOk,
+            isStarted: _isStarted,
+            onStart: () {
+              setState(() => _isStarted = true);
+              _counter.reset();
+            },
+          ),
+
+          // 4층: 가이드 예시 이미지 (왼쪽 아래)
+          Positioned(
+            bottom: 40,
+            left: 20,
+            child: Container(
+              width: 120,
+              height: 180,
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(0.5),
+                borderRadius: BorderRadius.circular(15),
+                border: Border.all(color: Colors.white, width: 2),
+                boxShadow: const [BoxShadow(blurRadius: 8, color: Colors.black45)],
+              ),
+              child: const ClipRRect(
+                borderRadius: BorderRadius.all(Radius.circular(13)),
+                child: SquatGuideView(),
+              ),
+            ),
+          ),
+
+          // 5층: 닫기 버튼 (오른쪽 위)
+          Positioned(
+            top: MediaQuery.of(context).padding.top + 10,
+            right: 10,
+            child: IconButton(
+              icon: const Icon(Icons.close, color: Colors.white, size: 28),
+              onPressed: () => Navigator.pop(context),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCameraPreview() {
+    return SizedBox.expand(
+      child: FittedBox(
+        fit: BoxFit.cover,
+        child: SizedBox(
+          width: _controller!.value.previewSize!.height, // iOS 가로세로 반전 대응
+          height: _controller!.value.previewSize!.width,
+          child: CameraPreview(_controller!),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSkeletonPainter() {
+    final previewWidth = _controller!.value.previewSize!.height;
+    final previewHeight = _controller!.value.previewSize!.width;
+
+    return SizedBox.expand(
+      child: FittedBox(
+        fit: BoxFit.cover,
+        child: SizedBox(
+          width: previewWidth,
+          height: previewHeight,
+          child: CustomPaint(
+            painter: PosePainter(
+              _poses,
+              Size(previewWidth, previewHeight), 
+              Platform.isAndroid ? InputImageRotation.rotation0deg : InputImageRotation.rotation90deg,
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   InputImage? _inputImageFromCameraImage(CameraImage image) {
@@ -177,35 +250,46 @@ class _CameraSquirtScreenState extends State<CameraSquirtScreen> {
     final format = InputImageFormatValue.fromRawValue(image.format.raw);
     if (format == null || (Platform.isIOS && format != InputImageFormat.bgra8888)) return null;
 
-    /*final plane = image.planes.first;
-
-    return InputImage.fromBytes(
-      bytes: plane.bytes,
-      metadata: InputImageMetadata(
-        size: Size(image.width.toDouble(), image.height.toDouble()),
-        rotation: rotation,
-        format: format,
-        bytesPerRow: plane.bytesPerRow,
-      ),
-    );*/
-
-    // 1. 모든 플레인(Y, U, V)의 바이트 데이터를 하나로 합칩니다.
     final WriteBuffer allBytes = WriteBuffer();
     for (final Plane plane in image.planes) {
       allBytes.putUint8List(plane.bytes);
     }
     final bytes = allBytes.done().buffer.asUint8List();
 
-    // 2. 합쳐진 데이터를 넘겨줍니다.
     return InputImage.fromBytes(
       bytes: bytes, 
       metadata: InputImageMetadata(
         size: Size(image.width.toDouble(), image.height.toDouble()),
         rotation: rotation,
         format: format,
-        bytesPerRow: image.planes.first.bytesPerRow, // 안드로이드는 첫 판의 가로 길이를 기준으로 잡습니다.
+        bytesPerRow: image.planes.first.bytesPerRow,
       ),
     );
+  }
+
+  Map<int, Vector3> _convertPoseToMap(Pose pose) {
+    final Map<int, Vector3> map = {};
+    final leftHip = pose.landmarks[PoseLandmarkType.leftHip];
+    final rightHip = pose.landmarks[PoseLandmarkType.rightHip];
+
+    if (leftHip == null || rightHip == null) return map;
+
+    final double originX = (leftHip.x + rightHip.x) / 2;
+    final double originY = (leftHip.y + rightHip.y) / 2;
+    final double originZ = (leftHip.z + rightHip.z) / 2;
+
+    final double hipWidth = sqrt(pow(leftHip.x - rightHip.x, 2) + pow(leftHip.y - rightHip.y, 2));
+    final double scale = hipWidth > 0 ? hipWidth : 1.0;
+
+    pose.landmarks.forEach((type, landmark) {
+      map[type.index] = Vector3(
+        (landmark.x - originX) / scale,
+        (landmark.y - originY) / scale,
+        (landmark.z - originZ) / scale
+      );
+    });
+
+    return map;
   }
 
   @override
@@ -213,98 +297,5 @@ class _CameraSquirtScreenState extends State<CameraSquirtScreen> {
     _controller?.dispose();
     _poseDetector.close();
     super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (!_isCameraInitialized) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
-    }
-
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: Stack(
-        children: [
-          // 1. 카메라 배경화면
-          SizedBox.expand(
-            child: FittedBox(
-              fit: BoxFit.cover,
-              child: SizedBox(
-                width: _controller!.value.previewSize!.height,
-                height: _controller!.value.previewSize!.width,
-                child: CameraPreview(_controller!),
-              ),
-            ),
-          ),
-
-          // 2. AI 관절 선 그리기
-          if (_poses.isNotEmpty)
-            SizedBox.expand(
-              child: CustomPaint(
-                painter: PosePainter(
-                  _poses,
-                  Size(_controller!.value.previewSize!.height, _controller!.value.previewSize!.width),
-                  Platform.isAndroid
-                      ? InputImageRotation.rotation0deg
-                      : InputImageRotation.rotation90deg,
-                ),
-              ),
-            ),
-
-          // 3. 분리한 커스텀 위젯 적용
-          SquatFeedbackBar(
-            message: _feedbackMessage,
-            isSpineOk: _isSpineOk,
-            isKneeOk: _isKneeOk,
-          ),
-
-          SquatCounterDisplay(
-            count: _squatCount,
-            state: _squatState,
-          ),
-
-          // 4. 우측 상단 X 버튼
-          Positioned(
-            top: MediaQuery.of(context).padding.top + 10,
-            right: 20,
-            child: IconButton(
-              icon: const Icon(Icons.close, color: Colors.white, size: 30),
-              style: IconButton.styleFrom(backgroundColor: Colors.black45),
-              onPressed: () => Navigator.of(context).pop(),
-            ),
-          ),
-
-          // 5. 운동 시작 버튼 overlay (시작 전까지만 표시)
-          if (!_isStarted)
-            Container(
-              color: Colors.black.withOpacity(0.5),
-              child: Center(
-                child: ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.greenAccent,
-                    padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 20),
-                  ),
-                  onPressed: () {
-                    setState(() => _isStarted = true);
-                    _counter.reset(); // 영점 조절
-                  },
-                  child: const Text(
-                    "운동 시작", 
-                    style: TextStyle(color: Colors.black, fontSize: 22, fontWeight: FontWeight.bold),
-                  ),
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Map<int, Vector3> _convertPoseToMap(Pose pose) {
-    final Map<int, Vector3> map = {};
-    pose.landmarks.forEach((type, landmark) {
-      map[type.index] = Vector3(landmark.x, landmark.y, landmark.z);
-    });
-    return map;
   }
 }

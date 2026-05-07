@@ -7,11 +7,12 @@ class Vector3 {
 }
 
 class SquatEngine {
-  // 파이썬 Config 클래스의 설정값을 상수로 정의
-  static const double hipYDownThresh = 0.12;
-  static const double hipYUpRatio = 0.7;
+  // 스쿼트로 인정할 만큼 무릎과 골반 간격이 좁아지는 변화량 (필요시 조절)
+  static const double kneeYDownThresh = 0.25; 
+  // 가장 깊게 앉았을 때를 기준으로 몇 % 일어서면 UP으로 볼 것인가 (0.7 = 70%)
+  static const double kneeYUpRatio = 0.7;
 
-  /// 세 점 사이의 3D 각도를 계산 (파이썬의 calc_angle_3d 로직)[cite: 1]
+  /// 세 점 사이의 3D 각도를 계산 (파이썬의 calc_angle_3d 로직)
   static double calculateAngle3D(Vector3 a, Vector3 b, Vector3 c) {
     double v1x = a.x - b.x; double v1y = a.y - b.y; double v1z = a.z - b.z;
     double v2x = c.x - b.x; double v2y = c.y - b.y; double v2z = c.z - b.z;
@@ -25,42 +26,62 @@ class SquatEngine {
   }
 }
 
-/// 스쿼트 개수와 상태를 관리하는 카운터 클래스[cite: 1]
+/// 스쿼트 개수와 상태를 관리하는 카운터 클래스
 class SquatCounter {
   int count = 0;
   String state = 'UP';
   double? baseY;
-  double? minYThisRep;
+  double? minKneeYThisRep;
+  
+  // ✨ 새로 추가된 변수: 앉아있는 동안 '완벽한 자세'가 몇 번 나왔는지 세는 카운터
+  int _perfectFrameCount = 0;
 
-  Map<String, dynamic> update(double currentHipY) {
+  // 🎛️ 난이도 조절 레버 (원하는 대로 숫자를 바꿔가며 내 몸에 맞추세요!)
+  // 카메라가 보통 1초에 30프레임(30번 판정)을 찍어냅니다.
+  // 5로 설정하면: 앉아있는 동안 최소 5번(약 0.15초) 이상 완벽한 자세가 유지되어야 1개 인정!
+  // 숫자를 키울수록(예: 10, 15) 코치가 더 깐깐해집니다.
+  final int requiredPerfectFrames = 5; 
+
+  Map<String, dynamic> update(double currentKneeY, bool isPosturePerfect) {
     bool counted = false;
 
     if (baseY == null) {
-      baseY = currentHipY;
+      baseY = currentKneeY;
       return {'count': count, 'state': state, 'counted': false};
     }
 
-    // 엉덩이가 기준점보다 일정 깊이 이상 내려갔을 때 DOWN 상태로 진입[cite: 1]
-    double downThresh = baseY! + SquatEngine.hipYDownThresh;
+    double downThresh = baseY! - SquatEngine.kneeYDownThresh;
 
     if (state == 'UP') {
-      if (currentHipY > downThresh) {
+      if (currentKneeY < downThresh) {
         state = 'DOWN';
-        minYThisRep = currentHipY;
+        minKneeYThisRep = currentKneeY;
+        
+        // 🚨 앉기 시작할 때 누적 프레임 카운터를 0으로 초기화
+        _perfectFrameCount = 0;
       }
     } else if (state == 'DOWN') {
-      if (currentHipY > (minYThisRep ?? 0)) {
-        minYThisRep = currentHipY;
+      if (currentKneeY < (minKneeYThisRep ?? baseY!)) {
+        minKneeYThisRep = currentKneeY;
+      }
+
+      // ✨ 평가: AI가 "자세 완벽함(true)"을 줄 때마다 카운트를 +1씩 쌓아줍니다.
+      if (isPosturePerfect) {
+        _perfectFrameCount++;
       }
       
-      // 다시 올라오는 지점을 계산하여 UP 상태로 복귀 및 카운트[cite: 1]
-      double upThresh = baseY! + (minYThisRep! - baseY!) * (1 - SquatEngine.hipYUpRatio);
-      if (currentHipY < upThresh) {
+      double upThresh = baseY! - (baseY! - minKneeYThisRep!) * (1 - SquatEngine.kneeYUpRatio);
+      
+      if (currentKneeY > upThresh) {
         state = 'UP';
-        count++;
-        counted = true;
-        // 기준점 미세 조정
-        baseY = 0.9 * baseY! + 0.1 * currentHipY;
+        
+        // ✨ 최종 심사: 일어날 때, 누적된 완벽 프레임 수가 '합격 기준'을 넘었는지 확인!
+        if (_perfectFrameCount >= requiredPerfectFrames) {
+          count++;
+          counted = true;
+        }
+        
+        baseY = 0.9 * baseY! + 0.1 * currentKneeY;
       }
     }
 
@@ -71,6 +92,7 @@ class SquatCounter {
     count = 0;
     state = 'UP';
     baseY = null;
-    minYThisRep = null;
+    minKneeYThisRep = null;
+    _perfectFrameCount = 0;
   }
 }

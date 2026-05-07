@@ -70,7 +70,7 @@ class PosePainter extends CustomPainter {
       // ... 하단의 'AI.FIT SQUAT ANALYZER' 텍스트 레이아웃 코드 시작
 
       // 점수판 UI (webcam_test.py의 디자인 참고)
-      final textPainter = TextPainter(
+      /*final textPainter = TextPainter(
         text: const TextSpan(
           text: 'AI.FIT SQUAT ANALYZER',
           style: TextStyle(
@@ -83,7 +83,7 @@ class PosePainter extends CustomPainter {
         textDirection: TextDirection.ltr,
       )..layout();
 
-      textPainter.paint(canvas, const Offset(20, 50));
+      textPainter.paint(canvas, const Offset(20, 50));*/
     }
   }
 

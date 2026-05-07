@@ -39,7 +39,7 @@ class GuideScreen extends StatelessWidget {
                 // 촬영 화면으로 이동!
                 Navigator.push(
                   context,
-                  MaterialPageRoute(builder: (context) => const CameraSquirtScreen()),
+                  MaterialPageRoute(builder: (context) => const CameraSquat()),
                 );
               },
               style: ElevatedButton.styleFrom(
